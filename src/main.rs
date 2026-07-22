@@ -285,6 +285,8 @@ async fn get_credentials(state: &Arc<AppState>) -> anyhow::Result<(String, Strin
         .client
         .post(format!("{}/v1internal:loadCodeAssist", ENDPOINT))
         .bearer_auth(&access_token)
+        .header("User-Agent", "google-api-nodejs-client/9.15.1")
+        .header("X-Goog-Api-Client", "google-cloud-sdk vscode_cloudshelleditor/0.1")
         .header(
             "Client-Metadata",
             r#"{"ideType":"ANTIGRAVITY","platform":"PLATFORM_UNSPECIFIED","pluginType":"GEMINI"}"#,
@@ -323,6 +325,11 @@ async fn quota_handler(State(state): State<Arc<AppState>>) -> Result<String, (St
         .post(format!("{}/v1internal:retrieveUserQuotaSummary", ENDPOINT))
         .bearer_auth(access_token)
         .header("User-Agent", "antigravity/windows/amd64")
+        .header("X-Goog-Api-Client", "google-cloud-sdk vscode_cloudshelleditor/0.1")
+        .header(
+            "Client-Metadata",
+            r#"{"ideType":"ANTIGRAVITY","platform":"PLATFORM_UNSPECIFIED","pluginType":"GEMINI"}"#,
+        )
         .json(&json!({"project": project_id}))
         .send()
         .await
@@ -382,10 +389,10 @@ async fn quota_handler(State(state): State<Arc<AppState>>) -> Result<String, (St
     Ok(output)
 }
 
-fn translate_openai_to_gemini(messages: &Value) -> Vec<Value> {
+fn translate_openai_to_gemini(messages: &Value) -> Value {
     let mut contents = Vec::new();
     let Some(msgs) = messages.as_array() else {
-        return contents;
+        return serde_json::Value::Array(contents);
     };
 
     for msg in msgs {
@@ -449,7 +456,7 @@ fn translate_openai_to_gemini(messages: &Value) -> Vec<Value> {
         merged.push(content);
     }
 
-    merged
+    serde_json::Value::Array(merged)
 }
 
 // Minimal implementation of chat completions for daemon functionality
@@ -493,21 +500,32 @@ async fn chat_completions(
     let gemini_contents = translate_openai_to_gemini(&req["messages"]);
     let temperature = req["temperature"].as_f64().unwrap_or(0.7);
 
-    let url = format!("{}/v1internal:{}", ENDPOINT, action);
+    let mut url = format!("{}/v1internal:{}", ENDPOINT, action);
+    if stream {
+        url.push_str("?alt=sse");
+    }
+    let request_body = json!({
+        "project": project_id,
+        "model": mapped_model,
+        "request": {
+            "contents": gemini_contents,
+            "generationConfig": {
+                "temperature": temperature
+            }
+        }
+    });
+
     let res = state
         .client
         .post(url)
         .bearer_auth(access_token)
-        .json(&json!({
-            "project": project_id,
-            "model": mapped_model,
-            "request": {
-                "contents": gemini_contents,
-                "generationConfig": {
-                    "temperature": temperature
-                }
-            }
-        }))
+        .header("User-Agent", "antigravity/windows/amd64")
+        .header("X-Goog-Api-Client", "google-cloud-sdk vscode_cloudshelleditor/0.1")
+        .header(
+            "Client-Metadata",
+            r#"{"ideType":"ANTIGRAVITY","platform":"PLATFORM_UNSPECIFIED","pluginType":"GEMINI"}"#,
+        )
+        .json(&request_body)
         .send()
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -519,7 +537,44 @@ async fn chat_completions(
         response.headers_mut().insert(header::CONNECTION, "keep-alive".parse().unwrap());
         Ok(response)
     } else {
-        let bytes = res.bytes().await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        Ok(Response::new(Body::from(bytes)))
+        let text = res.text().await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        let res_data: Value = serde_json::from_str(&text).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to parse JSON: {}, Raw: {}", e, text)))?;
+        
+        let mut text_content = String::new();
+        // The structure seems to vary. Sometimes it's res_data["candidates"] directly.
+        let candidates_arr = res_data["response"]["candidates"].as_array().or_else(|| res_data["candidates"].as_array());
+        
+        if let Some(candidates) = candidates_arr {
+            if let Some(first) = candidates.first() {
+                if let Some(parts) = first["content"]["parts"].as_array() {
+                    if let Some(part) = parts.first() {
+                        if let Some(t) = part["text"].as_str() {
+                            text_content = t.to_string();
+                        }
+                    }
+                }
+            }
+        }
+        
+        let openai_resp = json!({
+            "id": "chatcmpl-mock",
+            "object": "chat.completion",
+            "created": 1782210769,
+            "model": model,
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": text_content
+                    },
+                    "finish_reason": "stop"
+                }
+            ]
+        });
+        
+        let mut response = Response::new(Body::from(serde_json::to_string(&openai_resp).unwrap()));
+        response.headers_mut().insert(header::CONTENT_TYPE, "application/json".parse().unwrap());
+        Ok(response)
     }
 }
