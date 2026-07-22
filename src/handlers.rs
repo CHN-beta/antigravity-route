@@ -1,6 +1,7 @@
 use crate::auth::get_credentials;
 use crate::constants::{CLIENT_ID, CLIENT_SECRET, ENDPOINT, REDIRECT_URI, SCOPES};
 use crate::model_resolver::resolve_model_for_antigravity;
+use crate::claude_hacks::apply_claude_hacks;
 use crate::state::{AccountConfig, AccountsData, AppState};
 use axum::{
     Json,
@@ -13,7 +14,79 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::fs;
 use std::sync::Arc;
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
 use tracing::{error, info};
+use serde_json::Map;
+
+pub fn clean_schema(schema: Value) -> Value {
+    if !schema.is_object() {
+        return schema;
+    }
+    
+    let mut obj = schema.as_object().unwrap().clone();
+    
+    // Remove unsupported keys
+    let bad_keys = [
+        "$schema", "$ref", "anyOf", "oneOf", "allOf", "const", 
+        "pattern", "maxLength", "minLength", "maxItems", "minItems", 
+        "maximum", "minimum", "exclusiveMaximum", "exclusiveMinimum",
+        "multipleOf", "additionalProperties", "default", "format"
+    ];
+    
+    for key in bad_keys.iter() {
+        obj.remove(*key);
+    }
+    
+    // Fix type array -> string
+    if let Some(typ) = obj.get_mut("type")
+        && typ.is_array() {
+            let mut new_type = json!("string");
+            for t in typ.as_array().unwrap() {
+                if t.as_str() != Some("null") {
+                    new_type = t.clone();
+                    break;
+                }
+            }
+            *typ = new_type;
+        }
+    
+    // Process properties
+    if let Some(props) = obj.get_mut("properties").and_then(|p| p.as_object_mut()) {
+        for (_, v) in props.iter_mut() {
+            *v = clean_schema(v.clone());
+        }
+        
+        // If properties is empty, Claude might complain.
+        if props.is_empty() {
+            props.insert("_placeholder".to_string(), json!({
+                "type": "boolean",
+                "description": "Placeholder. Always pass true."
+            }));
+            if let Some(req) = obj.get_mut("required").and_then(|r| r.as_array_mut()) {
+                req.push(json!("_placeholder"));
+            } else {
+                obj.insert("required".to_string(), json!(["_placeholder"]));
+            }
+        }
+    } else if obj.get("type").and_then(|t| t.as_str()) == Some("object") {
+        // Type is object but no properties
+        let mut props = Map::new();
+        props.insert("_placeholder".to_string(), json!({
+            "type": "boolean",
+            "description": "Placeholder. Always pass true."
+        }));
+        obj.insert("properties".to_string(), Value::Object(props));
+        obj.insert("required".to_string(), json!(["_placeholder"]));
+    }
+    
+    // Process items
+    if let Some(items) = obj.get_mut("items") {
+        *items = clean_schema(items.clone());
+    }
+    
+    Value::Object(obj)
+}
 
 pub async fn auth_url() -> String {
     let mut url = url::Url::parse("https://accounts.google.com/o/oauth2/v2/auth").unwrap();
@@ -264,6 +337,15 @@ pub async fn gemini_proxy(
     // Check if it's already wrapped (sometimes opencode might wrap it)
     let is_wrapped = request_payload.get("project").is_some() && request_payload.get("request").is_some();
     
+    // Apply Claude hacks (Tool ID pairing, sorting parts, system instruction, etc.)
+    if is_wrapped {
+        if let Some(inner) = request_payload.get_mut("request") {
+            apply_claude_hacks(inner, model_name);
+        }
+    } else {
+        apply_claude_hacks(&mut request_payload, model_name);
+    }
+    
     let mut wrapped_body = if is_wrapped {
         request_payload["model"] = json!(model_name);
         request_payload
@@ -276,8 +358,8 @@ pub async fn gemini_proxy(
     };
 
     // Apply thinking config if applicable
-    if resolved_model.thinking_budget.is_some() || resolved_model.thinking_level.is_some() {
-        if let Some(req_obj) = wrapped_body.get_mut("request").and_then(|r| r.as_object_mut()) {
+    if (resolved_model.thinking_budget.is_some() || resolved_model.thinking_level.is_some())
+        && let Some(req_obj) = wrapped_body.get_mut("request").and_then(|r| r.as_object_mut()) {
             let gen_config = req_obj
                 .entry("generationConfig")
                 .or_insert_with(|| json!({}));
@@ -307,7 +389,20 @@ pub async fn gemini_proxy(
                 }
             }
         }
-    }
+
+    // Clean JSON schema for tool calls if needed
+    if let Some(req_obj) = wrapped_body.get_mut("request").and_then(|r| r.as_object_mut())
+        && let Some(tools) = req_obj.get_mut("tools").and_then(|t| t.as_array_mut()) {
+            for tool in tools.iter_mut() {
+                if let Some(funcs) = tool.get_mut("functionDeclarations").and_then(|f| f.as_array_mut()) {
+                    for func in funcs.iter_mut() {
+                        if let Some(params) = func.get_mut("parameters") {
+                            *params = clean_schema(params.clone());
+                        }
+                    }
+                }
+            }
+        }
 
     // Construct the Antigravity URL
     // e.g. https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal:generateContent
@@ -336,17 +431,81 @@ pub async fn gemini_proxy(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    // Create a streaming response
-    let mut builder = Response::builder().status(res.status());
-    for (name, value) in res.headers() {
-        // Strip out transfer-encoding as axum handles it
-        if name != reqwest::header::TRANSFER_ENCODING {
-            builder = builder.header(name, value);
-        }
-    }
+    if action == "streamGenerateContent" {
+        let (tx, rx) = mpsc::channel::<Result<String, String>>(32);
+        
+        tokio::spawn(async move {
+            let mut buffer = String::new();
+            let mut res = res;
 
-    let stream = res.bytes_stream();
-    let body = Body::from_stream(stream);
-    
-    Ok(builder.body(body).unwrap())
+            while let Ok(Some(chunk)) = res.chunk().await {
+                if let Ok(text) = std::str::from_utf8(&chunk) {
+                    buffer.push_str(text);
+
+                    while let Some(pos) = buffer.find('\n') {
+                        let line = buffer[..pos].trim_end().to_string();
+                        buffer.drain(..=pos); // Drain exactly up to and including the \n character
+
+                        if line.is_empty() {
+                            continue;
+                        }
+
+                        if let Some(stripped) = line.strip_prefix("data:") {
+                            let data_str = stripped.trim();
+                            if data_str.is_empty() {
+                                continue;
+                            }
+
+                            if let Ok(mut gemini_data) = serde_json::from_str::<Value>(data_str) {
+                                // Unwrap the "response" property if it exists
+                                if let Some(response_obj) = gemini_data.get("response") {
+                                    gemini_data = response_obj.clone();
+                                }
+                                
+                                let out = format!("data: {}\n\n", gemini_data);
+                                if tx.send(Ok(out)).await.is_err() {
+                                    return;
+                                }
+                            } else {
+                                // Send as is if parsing fails
+                                let out = format!("data: {}\n\n", data_str);
+                                if tx.send(Ok(out)).await.is_err() {
+                                    return;
+                                }
+                            }
+                        } else {
+                            // Forward non-data lines? SSE chunks start with data:
+                        }
+                    }
+                }
+            }
+            let _ = tx.send(Ok("data: [DONE]\n\n".to_string())).await;
+        });
+
+        let mut builder = Response::builder().status(StatusCode::OK);
+        builder = builder.header(reqwest::header::CONTENT_TYPE, "text/event-stream");
+        builder = builder.header(reqwest::header::CACHE_CONTROL, "no-cache");
+        builder = builder.header(reqwest::header::CONNECTION, "keep-alive");
+        
+        let body = Body::from_stream(ReceiverStream::new(rx));
+        Ok(builder.body(body).unwrap())
+    } else {
+        let text = res
+            .text()
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            
+        let mut res_data: Value = serde_json::from_str(&text).unwrap_or(json!({}));
+        
+        // Unwrap the "response" property if it exists
+        if let Some(response_obj) = res_data.get("response") {
+            res_data = response_obj.clone();
+        }
+        
+        let mut builder = Response::builder().status(StatusCode::OK);
+        builder = builder.header(reqwest::header::CONTENT_TYPE, "application/json");
+        
+        let body = Body::from(serde_json::to_string(&res_data).unwrap());
+        Ok(builder.body(body).unwrap())
+    }
 }

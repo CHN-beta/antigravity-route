@@ -5,6 +5,7 @@ mod daemon;
 mod handlers;
 mod state;
 mod model_resolver;
+mod claude_hacks;
 
 use anyhow::Result;
 use clap::Parser;

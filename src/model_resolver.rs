@@ -50,22 +50,22 @@ fn get_budget_for_tier(family: &str, tier: &str) -> u32 {
         "claude" => match tier {
             "low" => 8192,
             "medium" => 16384,
-            "high" | _ => 32768,
+            _ => 32768,
         },
         "gemini-2.5-pro" => match tier {
             "low" => 8192,
             "medium" => 16384,
-            "high" | _ => 32768,
+            _ => 32768,
         },
         "gemini-2.5-flash" => match tier {
             "low" => 6144,
             "medium" => 12288,
-            "high" | _ => 24576,
+            _ => 24576,
         },
         _ => match tier {
             "low" => 4096,
             "medium" => 8192,
-            "high" | _ => 16384,
+            _ => 16384,
         },
     }
 }
