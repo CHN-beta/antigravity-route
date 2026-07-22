@@ -1,9 +1,9 @@
-use crate::handlers::{auth_callback, auth_url, chat_completions, list_models, quota_handler};
+use crate::handlers::{auth_callback, auth_url, gemini_proxy, quota_handler};
 use crate::state::AppState;
 use anyhow::Result;
 use axum::{
     Router,
-    routing::{get, post},
+    routing::{get, post, any},
 };
 use reqwest::Client;
 use std::fs;
@@ -26,11 +26,11 @@ pub async fn run_daemon(datadir: PathBuf, port: u16) -> Result<()> {
     });
 
     let app = Router::new()
-        .route("/v1/models", get(list_models))
         .route("/v1/auth/url", get(auth_url))
         .route("/v1/auth/callback", post(auth_callback))
         .route("/v1/dashboard/billing/subscription", get(quota_handler))
-        .route("/v1/chat/completions", post(chat_completions))
+        .route("/v1beta/{*path}", any(gemini_proxy))
+        .route("/v1/{*path}", any(gemini_proxy))
         .with_state(state);
 
     let addr = SocketAddr::from(([127, 0, 0, 1], port));

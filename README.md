@@ -1,6 +1,6 @@
 # Antigravity Route
 
-A standalone, high-performance proxy daemon written in Rust that converts your Google Antigravity (Code Assist) subscription into an OpenAI-compatible API. This allows you to use powerful models like Claude 3.5 Sonnet and Gemini 1.5 Pro (via Google's infrastructure) in any AI agent or application that expects standard OpenAI endpoints.
+A standalone, high-performance proxy daemon written in Rust that converts your Google Antigravity (Code Assist) subscription into a standard **Gemini-compatible API**. This allows you to use powerful models like Claude 3.5 Sonnet and Gemini 1.5 Pro (via Google's infrastructure) in any AI agent or application that expects standard Google Gemini endpoints.
 
 ## ⚠️ DISCLAIMER & WARNING
 
@@ -12,10 +12,9 @@ Google may actively monitor for abnormal usage patterns (such as non-IDE User-Ag
 
 ## Features
 
-- **OpenAI Compatibility**: Exposes a `/v1/chat/completions` endpoint that perfectly mimics OpenAI's API.
-- **Smart Model Mapping**: Automatically translates standard model names (e.g., `claude-3-5-sonnet-latest`, `gpt-4o`) to the specific backend models provisioned by Antigravity (`claude-sonnet-4-6-thinking`, `gemini-1.5-pro` etc).
-- **True Streaming Support**: Fully supports HTTP Server-Sent Events (SSE) streaming for real-time typewriter-like token generation, piping bytes asynchronously with zero intermediate buffering.
-- **Message Translation**: Robustly converts OpenAI's `messages` array into Gemini's `contents` format, including system prompt remapping, alternating role merging, and base64 image (multimodal) extraction.
+- **Gemini Compatibility**: Exposes standard Gemini endpoints (e.g., `/v1beta/*path` and `/v1/*path`) acting as a seamless reverse proxy.
+- **Transparent Payload Proxying**: Leaves your Gemini requests completely untouched. This ensures native, bug-free support for Function Calling (Tools), System Instructions, and multimodal inputs without messy OpenAI-to-Gemini conversion logic.
+- **True Streaming Support**: Fully supports HTTP Server-Sent Events (SSE) streaming for real-time token generation, piping bytes asynchronously with zero intermediate buffering.
 - **Visual Quota CLI**: Includes a built-in terminal command to securely fetch and display your remaining Weekly and 5-Hour limits using beautiful ANSI colored progress bars.
 - **Standalone Daemon**: Designed as a C/S architecture. Runs silently in the background, storing all auth state locally in a customizable directory instead of clobbering your home folder.
 
@@ -83,11 +82,24 @@ This will print a formatted, color-coded progress bar showing exactly how much o
 
 ## Using with Agents
 
-Once the daemon is running and authenticated, you can point any OpenAI-compatible agent (like Continue.dev, Cursor, Aider, or custom scripts) to your local server:
+Once the daemon is running and authenticated, you can point any Gemini-compatible agent (like Opencode, Continue.dev, Cursor, or custom scripts) to your local server:
 
-- **Base URL**: `http://127.0.0.1:8999/v1`
-- **API Key**: `sk-anything` (The proxy handles auth natively, so any placeholder key works)
-- **Model**: Use standard names like `claude-3-5-sonnet-latest` or `gemini-1.5-pro`
+- **Provider**: Google / Gemini
+- **Base URL**: `http://127.0.0.1:8999` (Do not append `/v1` or `/v1beta`; most SDKs will do this automatically)
+- **API Key**: `dummy` (The proxy handles auth natively via OAuth, so any placeholder key works)
+- **Model**: Pass the exact Antigravity backend model name you want to use (e.g., `gemini-3.1-pro-preview`, `claude-opus-4-6-thinking`, `claude-sonnet-4-6`).
 
-## License
-MIT
+### Example (Opencode Configuration)
+
+In your `~/.config/opencode/opencode.json`:
+
+```json
+{
+  "provider": "google",
+  "providers": {
+    "google": {
+      "baseUrl": "http://127.0.0.1:8999"
+    }
+  }
+}
+```

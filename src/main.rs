@@ -4,7 +4,6 @@ mod constants;
 mod daemon;
 mod handlers;
 mod state;
-mod utils;
 
 use anyhow::Result;
 use clap::Parser;
