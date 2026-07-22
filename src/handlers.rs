@@ -1,5 +1,6 @@
 use crate::auth::get_credentials;
 use crate::constants::{CLIENT_ID, CLIENT_SECRET, ENDPOINT, REDIRECT_URI, SCOPES};
+use crate::model_resolver::resolve_model_for_antigravity;
 use crate::state::{AccountConfig, AccountsData, AppState};
 use axum::{
     Json,
@@ -247,9 +248,12 @@ pub async fn gemini_proxy(
     let model_part = &path[..colon_idx];
     let action = &path[colon_idx + 1..]; // e.g. "generateContent" or "streamGenerateContent"
 
-    let Some(model_name) = model_part.split('/').next_back() else {
+    let Some(requested_model) = model_part.split('/').next_back() else {
         return Err((StatusCode::BAD_REQUEST, "Missing model name".into()));
     };
+
+    let resolved_model = resolve_model_for_antigravity(requested_model);
+    let model_name = &resolved_model.actual_model;
 
     let body_bytes = axum::body::to_bytes(req.into_body(), usize::MAX)
         .await
@@ -260,7 +264,7 @@ pub async fn gemini_proxy(
     // Check if it's already wrapped (sometimes opencode might wrap it)
     let is_wrapped = request_payload.get("project").is_some() && request_payload.get("request").is_some();
     
-    let wrapped_body = if is_wrapped {
+    let mut wrapped_body = if is_wrapped {
         request_payload["model"] = json!(model_name);
         request_payload
     } else {
@@ -270,6 +274,40 @@ pub async fn gemini_proxy(
             "request": request_payload
         })
     };
+
+    // Apply thinking config if applicable
+    if resolved_model.thinking_budget.is_some() || resolved_model.thinking_level.is_some() {
+        if let Some(req_obj) = wrapped_body.get_mut("request").and_then(|r| r.as_object_mut()) {
+            let gen_config = req_obj
+                .entry("generationConfig")
+                .or_insert_with(|| json!({}));
+            
+            if let Some(gen_obj) = gen_config.as_object_mut() {
+                let thinking_config = gen_obj
+                    .entry("thinkingConfig")
+                    .or_insert_with(|| json!({}));
+                
+                if let Some(think_obj) = thinking_config.as_object_mut() {
+                    let is_claude = model_name.to_lowercase().contains("claude");
+                    let is_gemini3 = model_name.to_lowercase().contains("gemini-3");
+                    
+                    if is_claude {
+                        if let Some(budget) = resolved_model.thinking_budget {
+                            think_obj.insert("thinking_budget".to_string(), json!(budget));
+                        }
+                    } else if is_gemini3 {
+                        if let Some(ref level) = resolved_model.thinking_level {
+                            think_obj.insert("thinkingLevel".to_string(), json!(level));
+                        }
+                    } else {
+                        if let Some(budget) = resolved_model.thinking_budget {
+                            think_obj.insert("thinkingBudget".to_string(), json!(budget));
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     // Construct the Antigravity URL
     // e.g. https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal:generateContent

@@ -4,6 +4,7 @@ mod constants;
 mod daemon;
 mod handlers;
 mod state;
+mod model_resolver;
 
 use anyhow::Result;
 use clap::Parser;
