@@ -1,21 +1,24 @@
 use anyhow::{Context, Result};
 use axum::{
+    Json, Router,
     body::Body,
     extract::State,
-    http::{header, StatusCode},
+    http::{StatusCode, header},
     response::Response,
     routing::{get, post},
-    Json, Router,
 };
 use clap::{Parser, Subcommand};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::fs;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
 
 const CLIENT_ID: &str = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com";
 const CLIENT_SECRET: &str = "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";
@@ -23,7 +26,7 @@ const ENDPOINT: &str = "https://daily-cloudcode-pa.sandbox.googleapis.com";
 const REDIRECT_URI: &str = "http://localhost:51121/oauth-callback";
 const SCOPES: &str = "https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile";
 
-use tracing::{info, error};
+use tracing::{error, info};
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -92,7 +95,10 @@ async fn main() -> Result<()> {
 }
 
 async fn run_daemon(datadir: PathBuf, port: u16) -> Result<()> {
-    info!("Starting daemon on port {} with datadir {:?}", port, datadir);
+    info!(
+        "Starting daemon on port {} with datadir {:?}",
+        port, datadir
+    );
     fs::create_dir_all(&datadir)?;
     let state = Arc::new(AppState {
         datadir,
@@ -133,9 +139,10 @@ async fn run_auth_cli(daemon_url: &str) -> Result<()> {
 
     if code.starts_with("http")
         && let Ok(url) = url::Url::parse(&code)
-            && let Some((_, val)) = url.query_pairs().find(|(k, _)| k == "code") {
-                code = val.into_owned();
-            }
+        && let Some((_, val)) = url.query_pairs().find(|(k, _)| k == "code")
+    {
+        code = val.into_owned();
+    }
 
     let cb_url = format!("{}/v1/auth/callback", daemon_url);
     let resp = client
@@ -243,7 +250,11 @@ async fn auth_callback(
         serde_json::to_string_pretty(&acc_data).unwrap(),
     )
     .map_err(|e| {
-        error!("Failed to write accounts data to {}: {}", account_file.display(), e);
+        error!(
+            "Failed to write accounts data to {}: {}",
+            account_file.display(),
+            e
+        );
         (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
     })?;
 
@@ -286,7 +297,10 @@ async fn get_credentials(state: &Arc<AppState>) -> anyhow::Result<(String, Strin
         .post(format!("{}/v1internal:loadCodeAssist", ENDPOINT))
         .bearer_auth(&access_token)
         .header("User-Agent", "google-api-nodejs-client/9.15.1")
-        .header("X-Goog-Api-Client", "google-cloud-sdk vscode_cloudshelleditor/0.1")
+        .header(
+            "X-Goog-Api-Client",
+            "google-cloud-sdk vscode_cloudshelleditor/0.1",
+        )
         .header(
             "Client-Metadata",
             r#"{"ideType":"ANTIGRAVITY","platform":"PLATFORM_UNSPECIFIED","pluginType":"GEMINI"}"#,
@@ -325,7 +339,10 @@ async fn quota_handler(State(state): State<Arc<AppState>>) -> Result<String, (St
         .post(format!("{}/v1internal:retrieveUserQuotaSummary", ENDPOINT))
         .bearer_auth(access_token)
         .header("User-Agent", "antigravity/windows/amd64")
-        .header("X-Goog-Api-Client", "google-cloud-sdk vscode_cloudshelleditor/0.1")
+        .header(
+            "X-Goog-Api-Client",
+            "google-cloud-sdk vscode_cloudshelleditor/0.1",
+        )
         .header(
             "Client-Metadata",
             r#"{"ideType":"ANTIGRAVITY","platform":"PLATFORM_UNSPECIFIED","pluginType":"GEMINI"}"#,
@@ -342,7 +359,7 @@ async fn quota_handler(State(state): State<Arc<AppState>>) -> Result<String, (St
 
     // Format output as progress bars
     let mut output = String::new();
-    
+
     if let Some(groups) = val["groups"].as_array() {
         for group in groups {
             if let Some(display_name) = group["displayName"].as_str() {
@@ -351,17 +368,17 @@ async fn quota_handler(State(state): State<Arc<AppState>>) -> Result<String, (St
             if let Some(desc) = group["description"].as_str() {
                 output.push_str(&format!("\x1b[90m{}\x1b[0m\n", desc));
             }
-            
+
             if let Some(buckets) = group["buckets"].as_array() {
                 for bucket in buckets {
                     let bucket_name = bucket["displayName"].as_str().unwrap_or("Unknown Limit");
                     let remaining = bucket["remainingFraction"].as_f64().unwrap_or(0.0);
                     let used_pct = (1.0 - remaining) * 100.0;
-                    
+
                     let bar_width = 40;
                     let filled = (bar_width as f64 * (1.0 - remaining)) as usize;
                     let empty = bar_width - filled;
-                    
+
                     // ANSI colors: Red if used > 90%, Yellow if > 70%, Green otherwise
                     let color = if used_pct > 90.0 {
                         "\x1b[31m"
@@ -370,10 +387,18 @@ async fn quota_handler(State(state): State<Arc<AppState>>) -> Result<String, (St
                     } else {
                         "\x1b[32m"
                     };
-                    
-                    let bar = format!("{}{}{}\x1b[0m", color, "█".repeat(filled), "░".repeat(empty));
-                    output.push_str(&format!("  {:<15} [{}] {:>5.1}% used\n", bucket_name, bar, used_pct));
-                    
+
+                    let bar = format!(
+                        "{}{}{}\x1b[0m",
+                        color,
+                        "█".repeat(filled),
+                        "░".repeat(empty)
+                    );
+                    output.push_str(&format!(
+                        "  {:<15} [{}] {:>5.1}% used\n",
+                        bucket_name, bar, used_pct
+                    ));
+
                     if let Some(desc) = bucket["description"].as_str() {
                         output.push_str(&format!("    \x1b[90m{}\x1b[0m\n", desc));
                     }
@@ -415,21 +440,22 @@ fn translate_openai_to_gemini(messages: &Value) -> Value {
                     }
                 } else if part["type"].as_str() == Some("image_url")
                     && let Some(url) = part["image_url"]["url"].as_str()
-                        && url.starts_with("data:")
-                            && let Some(comma_idx) = url.find(',') {
-                                let meta = &url[5..comma_idx];
-                                let data = &url[comma_idx + 1..];
-                                let mut mime_type = "image/jpeg";
-                                if let Some(semi_idx) = meta.find(';') {
-                                    mime_type = &meta[..semi_idx];
-                                }
-                                parts.push(json!({
-                                    "inlineData": {
-                                        "mimeType": mime_type,
-                                        "data": data
-                                    }
-                                }));
-                            }
+                    && url.starts_with("data:")
+                    && let Some(comma_idx) = url.find(',')
+                {
+                    let meta = &url[5..comma_idx];
+                    let data = &url[comma_idx + 1..];
+                    let mut mime_type = "image/jpeg";
+                    if let Some(semi_idx) = meta.find(';') {
+                        mime_type = &meta[..semi_idx];
+                    }
+                    parts.push(json!({
+                        "inlineData": {
+                            "mimeType": mime_type,
+                            "data": data
+                        }
+                    }));
+                }
             }
         }
 
@@ -447,12 +473,13 @@ fn translate_openai_to_gemini(messages: &Value) -> Value {
     let mut merged: Vec<Value> = Vec::new();
     for content in contents {
         if let Some(last) = merged.last_mut()
-            && last["role"] == content["role"] {
-                let last_parts = last["parts"].as_array_mut().unwrap();
-                let mut content_parts = content["parts"].as_array().unwrap().clone();
-                last_parts.append(&mut content_parts);
-                continue;
-            }
+            && last["role"] == content["role"]
+        {
+            let last_parts = last["parts"].as_array_mut().unwrap();
+            let mut content_parts = content["parts"].as_array().unwrap().clone();
+            last_parts.append(&mut content_parts);
+            continue;
+        }
         merged.push(content);
     }
 
@@ -488,11 +515,16 @@ async fn chat_completions(
         "gemini-3.1-pro-low" => "gemini-3.1-pro-low",
         _ => "gemini-3.5-flash-low", // default fallback
     };
-    info!("Handling chat request for model {}, mapped to {}, stream: {}", model, mapped_model, req["stream"].as_bool().unwrap_or(false));
+    info!(
+        "Handling chat request for model {}, mapped to {}, stream: {}",
+        model,
+        mapped_model,
+        req["stream"].as_bool().unwrap_or(false)
+    );
 
     let stream = req["stream"].as_bool().unwrap_or(false);
     let action = if stream {
-        "streamGenerateContent?alt=sse"
+        "streamGenerateContent"
     } else {
         "generateContent"
     };
@@ -520,7 +552,10 @@ async fn chat_completions(
         .post(url)
         .bearer_auth(access_token)
         .header("User-Agent", "antigravity/windows/amd64")
-        .header("X-Goog-Api-Client", "google-cloud-sdk vscode_cloudshelleditor/0.1")
+        .header(
+            "X-Goog-Api-Client",
+            "google-cloud-sdk vscode_cloudshelleditor/0.1",
+        )
         .header(
             "Client-Metadata",
             r#"{"ideType":"ANTIGRAVITY","platform":"PLATFORM_UNSPECIFIED","pluginType":"GEMINI"}"#,
@@ -531,31 +566,130 @@ async fn chat_completions(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     if stream {
-        let mut response = Response::new(Body::from_stream(res.bytes_stream()));
-        response.headers_mut().insert(header::CONTENT_TYPE, "text/event-stream".parse().unwrap());
-        response.headers_mut().insert(header::CACHE_CONTROL, "no-cache".parse().unwrap());
-        response.headers_mut().insert(header::CONNECTION, "keep-alive".parse().unwrap());
-        Ok(response)
-    } else {
-        let text = res.text().await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        let res_data: Value = serde_json::from_str(&text).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to parse JSON: {}, Raw: {}", e, text)))?;
-        
-        let mut text_content = String::new();
-        // The structure seems to vary. Sometimes it's res_data["candidates"] directly.
-        let candidates_arr = res_data["response"]["candidates"].as_array().or_else(|| res_data["candidates"].as_array());
-        
-        if let Some(candidates) = candidates_arr {
-            if let Some(first) = candidates.first() {
-                if let Some(parts) = first["content"]["parts"].as_array() {
-                    if let Some(part) = parts.first() {
-                        if let Some(t) = part["text"].as_str() {
-                            text_content = t.to_string();
+        let req_model_clone = model.to_string();
+        let (tx, rx) = mpsc::channel::<Result<String, String>>(32);
+
+        tokio::spawn(async move {
+            let mut buffer = String::new();
+            let mut res = res;
+
+            while let Ok(Some(chunk)) = res.chunk().await {
+                if let Ok(text) = std::str::from_utf8(&chunk) {
+                    buffer.push_str(text);
+
+                    while let Some(pos) = buffer.find('\n') {
+                        let line = buffer[..pos].trim_end().to_string();
+                        buffer.drain(..=pos); // Drain exactly up to and including the \n character
+
+                        if line.is_empty() {
+                            continue;
+                        }
+
+                        if let Some(stripped) = line.strip_prefix("data:") {
+                            let data_str = stripped.trim();
+                            if data_str.is_empty() {
+                                continue;
+                            }
+
+                            if let Ok(gemini_data) = serde_json::from_str::<Value>(data_str) {
+                                let mut text_content = String::new();
+                                let mut finish_reason = None::<String>;
+
+                                // Extract arrays properly, looking into top-level or response obj
+                                let candidates_arr = gemini_data["response"]["candidates"]
+                                    .as_array()
+                                    .or_else(|| gemini_data["candidates"].as_array());
+
+                                if let Some(candidates) = candidates_arr {
+                                    if let Some(first) = candidates.first() {
+                                        if let Some(parts) = first["content"]["parts"].as_array()
+                                            && let Some(part) = parts.first()
+                                            && let Some(t) = part["text"].as_str()
+                                        {
+                                            text_content = t.to_string();
+                                        }
+                                        if let Some(reason) = first["finishReason"].as_str()
+                                            && (reason == "STOP" || !reason.is_empty()) {
+                                                finish_reason = Some("stop".to_string());
+                                            }
+                                    }
+                                } else {
+                                    // if there are no candidates, it might just be a heartbeat or empty chunk, skip to next.
+                                    // But what if it's the very first chunk?
+                                    // Let's print for debugging
+                                    tracing::debug!("Received unparseable SSE chunk: {}", gemini_data);
+                                }
+
+                                if !text_content.is_empty() || finish_reason.is_some() {
+                                    let now = SystemTime::now()
+                                        .duration_since(UNIX_EPOCH)
+                                        .unwrap()
+                                        .as_secs();
+
+                                    let chunk_json = json!({
+                                        "id": "chatcmpl-mock",
+                                        "object": "chat.completion.chunk",
+                                        "created": now,
+                                        "model": req_model_clone,
+                                        "choices": [
+                                            {
+                                                "delta": if !text_content.is_empty() { json!({"content": text_content}) } else { json!({}) },
+                                                "index": 0,
+                                                "finish_reason": finish_reason
+                                            }
+                                        ]
+                                    });
+
+                                    let out = format!("data: {}\n\n", chunk_json);
+                                    if tx.send(Ok(out)).await.is_err() {
+                                        return;
+                                    }
+                                }
+                            }
                         }
                     }
                 }
             }
-        }
-        
+            let _ = tx.send(Ok("data: [DONE]\n\n".to_string())).await;
+        });
+
+        let mut response = Response::new(Body::from_stream(ReceiverStream::new(rx)));
+        response
+            .headers_mut()
+            .insert(header::CONTENT_TYPE, "text/event-stream".parse().unwrap());
+        response
+            .headers_mut()
+            .insert(header::CACHE_CONTROL, "no-cache".parse().unwrap());
+        response
+            .headers_mut()
+            .insert(header::CONNECTION, "keep-alive".parse().unwrap());
+        Ok(response)
+    } else {
+        let text = res
+            .text()
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        let res_data: Value = serde_json::from_str(&text).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to parse JSON: {}, Raw: {}", e, text),
+            )
+        })?;
+
+        let mut text_content = String::new();
+        // The structure seems to vary. Sometimes it's res_data["candidates"] directly.
+        let candidates_arr = res_data["response"]["candidates"]
+            .as_array()
+            .or_else(|| res_data["candidates"].as_array());
+
+        if let Some(candidates) = candidates_arr
+            && let Some(first) = candidates.first()
+                && let Some(parts) = first["content"]["parts"].as_array()
+                    && let Some(part) = parts.first()
+                        && let Some(t) = part["text"].as_str() {
+                            text_content = t.to_string();
+                        }
+
         let openai_resp = json!({
             "id": "chatcmpl-mock",
             "object": "chat.completion",
@@ -572,9 +706,11 @@ async fn chat_completions(
                 }
             ]
         });
-        
+
         let mut response = Response::new(Body::from(serde_json::to_string(&openai_resp).unwrap()));
-        response.headers_mut().insert(header::CONTENT_TYPE, "application/json".parse().unwrap());
+        response
+            .headers_mut()
+            .insert(header::CONTENT_TYPE, "application/json".parse().unwrap());
         Ok(response)
     }
 }
