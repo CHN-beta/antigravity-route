@@ -18,8 +18,10 @@ pub struct AccountsData {
     pub active_index: i32,
 }
 
+use std::time::Instant;
+
 pub struct AppState {
     pub datadir: PathBuf,
     pub client: Client,
-    pub token_cache: Mutex<Option<(String, String)>>, // (access_token, project_id)
+    pub token_cache: Mutex<Option<(String, String, Instant)>>, // (access_token, project_id, timestamp)
 }

@@ -7,9 +7,10 @@ use std::sync::Arc;
 
 pub async fn get_credentials(state: &Arc<AppState>) -> anyhow::Result<(String, String)> {
     let mut cache = state.token_cache.lock().await;
-    if let Some(creds) = &*cache {
-        return Ok(creds.clone());
-    }
+    if let Some((access_token, project_id, timestamp)) = &*cache
+        && timestamp.elapsed().as_secs() < 3000 {
+            return Ok((access_token.clone(), project_id.clone()));
+        }
 
     let account_file = state.datadir.join("antigravity-accounts.json");
     let acc_data: AccountsData = serde_json::from_str(&fs::read_to_string(&account_file)?)?;
@@ -65,6 +66,6 @@ pub async fn get_credentials(state: &Arc<AppState>) -> anyhow::Result<(String, S
             .to_string()
     };
 
-    *cache = Some((access_token.clone(), project_id.clone()));
+    *cache = Some((access_token.clone(), project_id.clone(), std::time::Instant::now()));
     Ok((access_token, project_id))
 }
