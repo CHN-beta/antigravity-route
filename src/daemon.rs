@@ -1,4 +1,4 @@
-use crate::handlers::{auth_callback, auth_url, chat_completions, quota_handler};
+use crate::handlers::{auth_callback, auth_url, chat_completions, list_models, quota_handler};
 use crate::state::AppState;
 use anyhow::Result;
 use axum::{
@@ -26,6 +26,7 @@ pub async fn run_daemon(datadir: PathBuf, port: u16) -> Result<()> {
     });
 
     let app = Router::new()
+        .route("/v1/models", get(list_models))
         .route("/v1/auth/url", get(auth_url))
         .route("/v1/auth/callback", post(auth_callback))
         .route("/v1/dashboard/billing/subscription", get(quota_handler))

@@ -430,3 +430,83 @@ pub async fn chat_completions(
         Ok(response)
     }
 }
+
+pub async fn list_models() -> Result<Response, (StatusCode, String)> {
+    let openai_resp = json!({
+        "object": "list",
+        "data": [
+            {
+                "id": "antigravity-gemini-3-pro",
+                "object": "model",
+                "created": 1782210769,
+                "owned_by": "google"
+            },
+            {
+                "id": "antigravity-gemini-3.1-pro",
+                "object": "model",
+                "created": 1782210769,
+                "owned_by": "google"
+            },
+            {
+                "id": "antigravity-gemini-3-flash",
+                "object": "model",
+                "created": 1782210769,
+                "owned_by": "google"
+            },
+            {
+                "id": "antigravity-claude-sonnet-4-6",
+                "object": "model",
+                "created": 1782210769,
+                "owned_by": "anthropic"
+            },
+            {
+                "id": "antigravity-claude-opus-4-6-thinking",
+                "object": "model",
+                "created": 1782210769,
+                "owned_by": "anthropic"
+            },
+            {
+                "id": "gemini-2.5-flash",
+                "object": "model",
+                "created": 1782210769,
+                "owned_by": "google"
+            },
+            {
+                "id": "gemini-2.5-pro",
+                "object": "model",
+                "created": 1782210769,
+                "owned_by": "google"
+            },
+            {
+                "id": "gemini-3-flash-preview",
+                "object": "model",
+                "created": 1782210769,
+                "owned_by": "google"
+            },
+            {
+                "id": "gemini-3-pro-preview",
+                "object": "model",
+                "created": 1782210769,
+                "owned_by": "google"
+            },
+            {
+                "id": "gemini-3.1-pro-preview",
+                "object": "model",
+                "created": 1782210769,
+                "owned_by": "google"
+            },
+            {
+                "id": "gemini-3.1-pro-preview-customtools",
+                "object": "model",
+                "created": 1782210769,
+                "owned_by": "google"
+            }
+        ]
+    });
+
+    let mut response = Response::new(Body::from(serde_json::to_string(&openai_resp).unwrap()));
+    response
+        .headers_mut()
+        .insert(header::CONTENT_TYPE, "application/json".parse().unwrap());
+    Ok(response)
+}
